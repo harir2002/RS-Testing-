@@ -141,24 +141,34 @@ def generate_excel_report(results):
     output_stream.seek(0)
     return output_stream
 
-# --- UI (no changes here) ---
+# --- UI with Automatic Reset Functionality ---
 st.set_page_config(page_title="Excel Reconciliation Tool", layout="wide")
 st.title("Excel Data Reconciliation Tool")
 
+# --- NEW: Function to reset the application state ---
+def reset_for_next_run():
+    """Resets the session state variables to clear the results and UI."""
+    st.session_state.ran_comparison = False
+    st.session_state.results = {}
+
+# Initialize session state variables if they don't exist
 if 'ran_comparison' not in st.session_state:
     st.session_state.ran_comparison = False
 if 'results' not in st.session_state:
     st.session_state.results = {}
 
+# File uploaders
 input_file = st.file_uploader("Upload Input (Source of Truth) Excel", type=['xlsx'])
 output_file = st.file_uploader("Upload Output (File to Test) Excel", type=['xlsx'])
 
+# Button to run the reconciliation
 if input_file and output_file:
     if st.button("Run Reconciliation", type="primary"):
         with st.spinner("Performing cell-by-cell reconciliation..."):
             st.session_state.results = compare_excel_files(input_file, output_file)
         st.session_state.ran_comparison = True
 
+# Display results section if reconciliation has been run
 if st.session_state.ran_comparison:
     results = st.session_state.get('results', {})
     if results:
@@ -175,10 +185,12 @@ if st.session_state.ran_comparison:
         col3.metric(label="❌ Mismatched Cells", value=wrong_count, delta_color="inverse")
                 
         st.markdown("---")
-        # --- THIS IS THE ONLY CHANGE ---
+        
+        # --- UPDATED: Download button now calls the reset function on click ---
         st.download_button(
             label="📄 Download Full Test Report (Excel)", 
             data=generate_excel_report(st.session_state.results), 
             file_name=f"Test_Report_{datetime.now().strftime('%d-%m-%Y_%H-%M')}.xlsx", 
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            on_click=reset_for_next_run  # This line resets the app after download
         )
