@@ -1,196 +1,372 @@
 import streamlit as st
 import pandas as pd
+import pdfplumber
+import PyPDF2
+from io import BytesIO
 import openpyxl
-import io
+from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from datetime import datetime
+import os
+from dotenv import load_dotenv
 
-# --- Core Reconciliation Logic (no changes here) ---
-def compare_excel_files(input_file, output_file):
-    results = {}
-    try:
-        input_wb = openpyxl.load_workbook(input_file, data_only=True)
-        output_wb = openpyxl.load_workbook(output_file, data_only=True)
-    except Exception as e:
-        st.error(f"Fatal Error: Could not open or read the Excel files. Please check if they are valid. Details: {e}")
-        return {}
+# --- Core logic for both sheets is now imported ---
+from create_addon import create_addon
+from create_addon_coverages import create_addon_coverages
 
-    common_sheets = sorted(list(set(input_wb.sheetnames).intersection(set(output_wb.sheetnames))))
+# Load environment variables
+load_dotenv()
 
-    for sheet_name in common_sheets:
-        try:
-            results[sheet_name] = {"correct_cells": [], "discrepancies": []}
-            input_ws = input_wb[sheet_name]
-            output_ws = output_wb[sheet_name]
-            
-            num_data_cols = input_ws.max_column
-            num_data_rows = input_ws.max_row
-            
-            headers = {c: input_ws.cell(row=3, column=c).value for c in range(1, num_data_cols + 1)}
+# --- All Authentication and Helper Functions (Unchanged) ---
+def load_users_from_env():
+    users = {}
+    for i in range(1, 4):
+        username = os.getenv(f'USER{i}_NAME')
+        password = os.getenv(f'USER{i}_PASSWORD')
+        if username and password:
+            users[username] = password
+    return users
 
-            # HEADER VALUE CHECK (Row 3)
-            for col in range(1, num_data_cols + 1):
-                template_cell = input_ws.cell(row=3, column=col)
-                if template_cell.value is None or str(template_cell.value).strip() == '':
-                    continue
-                
-                output_cell = output_ws.cell(row=3, column=col)
-                column_name = headers.get(col)
-                error_base = {"Cell": output_cell.coordinate, "Column": column_name}
-                
-                if template_cell.value != output_cell.value:
-                    results[sheet_name]["discrepancies"].append({**error_base, "Reason": "Value Mismatch", "Template_Value": template_cell.value, "Output_Value": output_cell.value})
-                else:
-                    results[sheet_name]["correct_cells"].append({**error_base, "Template_Value": template_cell.value, "Output_Value": output_cell.value})
+def check_authentication(username, password, users):
+    return username in users and users[username] == password
 
-            # DATA VALUE CHECK (Row 4 onwards)
-            for row_idx in range(4, num_data_rows + 1):
-                for col_idx in range(1, num_data_cols + 1):
-                    template_cell = input_ws.cell(row=row_idx, column=col_idx)
-                    
-                    if template_cell.value is None or str(template_cell.value).strip() == "":
-                        continue
-
-                    output_cell = output_ws.cell(row=row_idx, column=col_idx)
-                    column_name = headers.get(col_idx, f"Column_{col_idx}")
-                    error_base = {"Cell": output_cell.coordinate, "Column": column_name}
-                    
-                    if template_cell.value != output_cell.value:
-                        results[sheet_name]["discrepancies"].append({**error_base, "Reason": "Value Mismatch", "Template_Value": template_cell.value, "Output_Value": output_cell.value})
-                    else:
-                        results[sheet_name]["correct_cells"].append({**error_base, "Template_Value": template_cell.value, "Output_Value": output_cell.value})
-        
-        except Exception as e:
-            st.warning(f"Could not process sheet '{sheet_name}'. The following error occurred: {e}")
-            if sheet_name in results:
-                del results[sheet_name]
-            continue
-    
-    return results
-
-# --- Report Generation (no changes here) ---
-def generate_excel_report(results):
-    output_stream = io.BytesIO()
-    writer = pd.ExcelWriter(output_stream, engine='xlsxwriter')
-    workbook = writer.book
-
-    all_results_list = []
-    
-    for sheet_name, sheet_results in results.items():
-        if sheet_results:
-            for error in sheet_results.get("discrepancies", []):
-                all_results_list.append({
-                    "SHEET": sheet_name, 
-                    "CELL": error.get("Cell", "N/A"),
-                    "FIELD": error.get("Column", "N/A"), 
-                    "EXPECTED VALUE": str(error.get("Template_Value", "")),
-                    "TEST VALUE": str(error.get("Output_Value", "")), 
-                    "RIGHT/WRONG": "WRONG",
-                    "Reason": error.get("Reason", "Unknown Error")
-                })
-            for correct in sheet_results.get("correct_cells", []):
-                 all_results_list.append({
-                    "SHEET": sheet_name, 
-                    "CELL": correct.get("Cell", "N/A"),
-                    "FIELD": correct.get("Column", "N/A"), 
-                    "EXPECTED VALUE": str(correct.get("Template_Value", "")),
-                    "TEST VALUE": str(correct.get("Output_Value", "")), 
-                    "RIGHT/WRONG": "RIGHT",
-                    "Reason": "OK"
-                })
-
-    columns = ["SHEET", "CELL", "FIELD", "EXPECTED VALUE", "TEST VALUE", "RIGHT/WRONG", "Reason"]
-    if not all_results_list:
-        detailed_df = pd.DataFrame(columns=columns)
-    else:
-        detailed_df = pd.DataFrame(all_results_list, columns=columns)
-
-    correct_count = len(detailed_df[detailed_df["RIGHT/WRONG"] == "RIGHT"])
-    wrong_count = len(detailed_df[detailed_df["RIGHT/WRONG"] == "WRONG"])
-    total_count = correct_count + wrong_count
-    accuracy_score = (correct_count / total_count * 100) if total_count > 0 else 100
-
-    dashboard_sheet = workbook.add_worksheet("QA Dashboard")
-    title_format = workbook.add_format({'bold': True, 'font_size': 20, 'align': 'center', 'valign': 'vcenter'})
-    kpi_format = workbook.add_format({'bold': True, 'font_size': 28, 'align': 'center', 'valign': 'vcenter'})
-    kpi_label_format = workbook.add_format({'font_size': 12, 'align': 'center', 'font_color': '#595959'})
-
-    dashboard_sheet.merge_range('B2:F3', 'Data Reconciliation Dashboard', title_format)
-    dashboard_sheet.merge_range('B5:C7', correct_count, kpi_format); dashboard_sheet.merge_range('B8:C8', 'Matching Cells', kpi_label_format)
-    dashboard_sheet.merge_range('E5:F7', wrong_count, kpi_format); dashboard_sheet.merge_range('E8:F8', 'Mismatched Cells', kpi_label_format)
-    dashboard_sheet.merge_range('B10:F12', f"{accuracy_score:.1f}%", kpi_format); dashboard_sheet.merge_range('B13:F13', 'Overall Accuracy Score', kpi_label_format)
-    dashboard_sheet.set_column('B:F', 20)
-    
-    detailed_df.to_excel(writer, sheet_name="Detailed Test Results", index=False, startrow=1, header=False)
-    worksheet = writer.sheets["Detailed Test Results"]
-
-    header_format_yellow = workbook.add_format({'bold': True, 'font_color': '#000000', 'bg_color': '#FFFF00', 'align': 'center', 'valign': 'vcenter', 'border': 1})
-    header_format_red = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': '#FF0000', 'align': 'center', 'valign': 'vcenter', 'border': 1})
-    header_format_green = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': '#70AD47', 'align': 'center', 'valign': 'vcenter', 'border': 1})
-
-    for col_num, col_name in enumerate(detailed_df.columns):
-        if col_num < 3:
-            worksheet.write(0, col_num, col_name, header_format_yellow)
-        elif col_num < 5:
-            worksheet.write(0, col_num, col_name, header_format_red)
-        else:
-            worksheet.write(0, col_num, col_name, header_format_green)
-    
-    worksheet.set_column('A:G', 22)
-
-    writer.close()
-    output_stream.seek(0)
-    return output_stream
-
-# --- UI with Automatic Reset Functionality ---
-st.set_page_config(page_title="Excel Reconciliation Tool", layout="wide")
-st.title("Excel Data Reconciliation Tool")
-
-# --- NEW: Function to reset the application state ---
-def reset_for_next_run():
-    """Resets the session state variables to clear the results and UI."""
-    st.session_state.ran_comparison = False
-    st.session_state.results = {}
-
-# Initialize session state variables if they don't exist
-if 'ran_comparison' not in st.session_state:
-    st.session_state.ran_comparison = False
-if 'results' not in st.session_state:
-    st.session_state.results = {}
-
-# File uploaders
-input_file = st.file_uploader("Upload Input (Source of Truth) Excel", type=['xlsx'])
-output_file = st.file_uploader("Upload Output (File to Test) Excel", type=['xlsx'])
-
-# Button to run the reconciliation
-if input_file and output_file:
-    if st.button("Run Reconciliation", type="primary"):
-        with st.spinner("Performing cell-by-cell reconciliation..."):
-            st.session_state.results = compare_excel_files(input_file, output_file)
-        st.session_state.ran_comparison = True
-
-# Display results section if reconciliation has been run
-if st.session_state.ran_comparison:
-    results = st.session_state.get('results', {})
-    if results:
-        correct_count = sum(len(sheet.get('correct_cells', [])) for sheet in results.values() if sheet)
-        wrong_count = sum(len(sheet.get('discrepancies', [])) for sheet in results.values() if sheet)
-        total_count = correct_count + wrong_count
-        
-        accuracy_score = (correct_count / total_count * 100) if total_count > 0 else 100
-
-        st.header("On-Screen Reconciliation Summary")
-        col1, col2, col3 = st.columns(3)
-        col1.metric(label="📊 Accuracy Score", value=f"{accuracy_score:.2f}%")
-        col2.metric(label="✅ Matching Cells", value=correct_count)
-        col3.metric(label="❌ Mismatched Cells", value=wrong_count, delta_color="inverse")
-                
+def authentication_page():
+    users = load_users_from_env()
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.markdown("### 🔐 Authentication Required")
+        st.markdown("Please login to access the PDF to Excel Extractor")
         st.markdown("---")
+        username = st.text_input("Username", placeholder="Enter your username", key="login_username")
+        password = st.text_input("Password", type="password", placeholder="Enter your password", key="login_password")
+        if st.button("🚀 Login", use_container_width=True, type="primary"):
+            if check_authentication(username, password, users):
+                st.session_state.authenticated = True
+                st.session_state.username = username
+                st.success("✅ Login successful!")
+                st.rerun()
+            else:
+                st.error("❌ Invalid username or password!")
+        with st.expander("ℹ️ Test Users", expanded=False):
+            st.markdown("**Available Test Users:**")
+            if users:
+                for user, pwd in users.items():
+                    st.code(f"👤 {user} | 🔒 {pwd}", language="text")
+
+# --- Page Config (Unchanged) ---
+st.set_page_config(
+    page_title="PDF to Excel Extractor",
+    page_icon="🚀",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# --- COMPLETE CSS BLOCK (Unchanged) ---
+st.markdown("""
+<style>
+    /* Main app background */
+    [data-testid="stAppViewContainer"] {
+        background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+    }
+    /* Sidebar background */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
+    }
+    /* All text elements */
+    .stMarkdown, .stText, .stDataFrame, .stExpander, .stButton, .stTextInput {
+        color: white !important;
+        background: transparent !important;
+    }
+    /* Dataframes */
+    .stDataFrame > div {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: white !important;
+    }
+    /* Input fields */
+    .stTextInput > div > div > input {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: white !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    }
+    .stTextInput > div > div > input::placeholder {
+        color: rgba(255, 255, 255, 0.6) !important;
+    }
+    /* Buttons */
+    .stButton > button {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: white !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    }
+    /* Expanders */
+    .streamlit-expanderHeader {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: white !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    }
+    /* Text areas */
+    .stTextArea > div > div > textarea {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: white !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    }
+    /* File uploader */
+    .stFileUploader > div {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: white !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    }
+    /* Success and error messages */
+    .stSuccess, .stError {
+        background: rgba(255, 255, 255, 0.1) !important;
+        color: white !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
+    }
+    /* Header styling for main app */
+    .main-header {
+        background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+        padding: 1.5rem;
+        border-radius: 15px;
+        margin-bottom: 1rem;
+        text-align: center;
+        color: white !important;
+        box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
+    }
+    .main-header h1 {
+        margin: 0;
+        font-size: 2.5rem;
+        font-weight: 700;
+        text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        color: white !important;
+    }
+    .main-header p {
+        margin: 0.5rem 0 0 0;
+        font-size: 1.1rem;
+        opacity: 0.9;
+        color: white !important;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+
+def extract_text_from_pdf(pdf_file):
+    """Extract text from uploaded PDF file"""
+    text = ""
+    try:
+        pdf_file.seek(0)
+        with pdfplumber.open(pdf_file) as pdf:
+            for page in pdf.pages:
+                page_text = page.extract_text()
+                if page_text:
+                    text += page_text + "\n"
+        if len(text.strip()) < 100:
+            pdf_file.seek(0)
+            pdf_reader = PyPDF2.PdfReader(pdf_file)
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+        return text
+    except Exception as e:
+        st.error(f"Error reading PDF: {str(e)}")
+        return None
+
+
+def create_addon_excel_with_formatting(covers_result):
+    """Creates the 'Addon Covers' sheet with detailed formatting."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Addon Covers"
+    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    wrap_alignment = Alignment(wrap_text=True, vertical='center')
+    thin_border_all_sides = Border(left=Side(style='thin'),
+                                   right=Side(style='thin'),
+                                   top=Side(style='thin'),
+                                   bottom=Side(style='thin'))
+    if not covers_result:
+        ws['A1'] = "No addon data was generated."
+        return wb
+    headers = list(covers_result[0].keys())
+    num_cols = len(headers)
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=num_cols)
+    title_cell = ws.cell(row=1, column=1, value="Addon Covers")
+    title_cell.alignment = wrap_alignment
+
+    for row_num in [1, 2]:
+        for i in range(1, num_cols + 1):
+            cell = ws.cell(row=row_num, column=i)
+            cell.fill = yellow_fill
+            border_style = Border(top=Side(style='thin'), bottom=Side(style='thin'),
+                                  left=Side(style='thin') if i == 1 else None,
+                                  right=Side(style='thin') if i == num_cols else None)
+            cell.border = border_style
+
+    for col_num, header_title in enumerate(headers, 1):
+        cell = ws.cell(row=3, column=col_num, value=header_title)
+        cell.fill = yellow_fill
+        cell.alignment = wrap_alignment
+        cell.border = thin_border_all_sides
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_num)].width = 18
+
+    df = pd.DataFrame(covers_result)[headers]
+    for row_index, row_data in enumerate(df.values, 4):
+        for col_index, cell_value in enumerate(row_data, 1):
+            cell = ws.cell(row=row_index, column=col_index, value=cell_value)
+            cell.alignment = wrap_alignment
+            cell.border = thin_border_all_sides
+    return wb
+
+
+def create_final_excel_workbook(covers_result, coverages_result):
+    """Creates the workbook with final layout, multi-row tables, and no empty row."""
+    wb = create_addon_excel_with_formatting(covers_result)
+    ws = wb.create_sheet(title="Addon Coverages")
+
+    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    wrap_alignment = Alignment(wrap_text=True, vertical='center', horizontal='center')
+    thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+    def draw_table(start_col, title, headers, data_keys, data_list):
+        table_width = len(headers)
+        num_data_rows = len(data_list)
         
-        # --- UPDATED: Download button now calls the reset function on click ---
-        st.download_button(
-            label="📄 Download Full Test Report (Excel)", 
-            data=generate_excel_report(st.session_state.results), 
-            file_name=f"Test_Report_{datetime.now().strftime('%d-%m-%Y_%H-%M')}.xlsx", 
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            on_click=reset_for_next_run  # This line resets the app after download
-        )
+        # Apply formatting to all cells, starting from row 2
+        for c in range(start_col, start_col + table_width):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(c)].width = 20
+            # Adjust loop to cover all data rows
+            for r in range(2, 4 + num_data_rows):
+                ws.cell(row=r, column=c).border = thin_border
+                ws.cell(row=r, column=c).alignment = wrap_alignment
+
+        # Table titles are now on row 2
+        ws.merge_cells(start_row=2, start_column=start_col, end_row=2, end_column=start_col + table_width - 1)
+        ws.cell(row=2, column=start_col, value=title).fill = yellow_fill
+        
+        # Headers are now on row 3
+        for i, header in enumerate(headers):
+            ws.cell(row=3, column=start_col + i, value=header).fill = yellow_fill
+
+        # Data starts on row 4
+        for row_idx, data_dict in enumerate(data_list):
+            for col_idx, key in enumerate(data_keys):
+                value = data_dict.get(key, "")
+                data_cell = ws.cell(row=4 + row_idx, column=start_col + col_idx, value=value)
+                if "Percentage" in headers[col_idx] and isinstance(value, (int, float)):
+                    data_cell.number_format = '0.00%'
+        
+        return table_width
+
+    # --- Define tables to draw ---
+    tables_to_draw = []
+    if coverages_result.get("Ambulance Cover"):
+        tables_to_draw.append({
+            "title": "Ambulance Cover",
+            "headers": ["Number Of Trips", "Sum Insured", "% Limit Applicable On", "Limit Percentage", "Limit Amount", "Applicability"],
+            "keys": ["Number of Trips", "Sum Insured", "% Limit Applicable On", "Limit Percentage", "Limit Amount", "Applicability"],
+            "data": coverages_result["Ambulance Cover"]
+        })
+    if coverages_result.get("Convalescence Benefit"):
+        tables_to_draw.append({
+            "title": "Convalescence Benefit",
+            "headers": ["Minimum LOS in days", "Applicable From", "Sum Insured", "Benefit Amount"],
+            "keys": ["Minimum LOS in days", "Applicable From", "Sum Insured", "Benefit Amount"],
+            "data": coverages_result["Convalescence Benefit"]
+        })
+
+    # --- Draw the Sheet ---
+    # Row 1 title remains the same
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=10)
+    title_cell = ws.cell(row=1, column=1, value="Addon Coverages")
+    title_cell.fill = yellow_fill
+    for i in range(1, 11):
+        ws.cell(row=1, column=i).border = thin_border
+
+    # Draw tables starting from column 1
+    current_col = 1
+    for table in tables_to_draw:
+        width = draw_table(current_col, table["title"], table["headers"], table["keys"], table["data"])
+        current_col += width
+    
+    return wb
+
+
+def main():
+    if 'authenticated' not in st.session_state:
+        st.session_state.authenticated = False
+    
+    if not st.session_state.authenticated:
+        authentication_page()
+        return
+    
+    st.markdown(f"""
+    <div class="main-header">
+        <h1>🚀 PDF to Excel Extractor</h1>
+        <p>Welcome, <strong>{st.session_state.username}</strong>! This tool extracts Addon Cover details from your PDF.</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    with st.sidebar:
+        st.markdown("### 👤 User Session")
+        st.info(f"**Logged in as:** {st.session_state.username}")
+        if st.button("🚪 Logout", type="secondary", use_container_width=True):
+            st.session_state.authenticated = False
+            st.session_state.username = None
+            st.rerun()
+        st.markdown("---")
+
+    uploaded_file = st.sidebar.file_uploader("Choose a PDF file", type=['pdf'])
+    
+    if uploaded_file is not None:
+        st.success(f"✅ File uploaded: {uploaded_file.name}")
+        with st.spinner("🔍 Extracting text from PDF..."):
+            text = extract_text_from_pdf(uploaded_file)
+        
+        if text:
+            addon_covers_result = create_addon(text)
+            
+            st.subheader("📊 Extracted Addon Covers (Yes/No)")
+            df_addon = pd.DataFrame(addon_covers_result)
+            st.dataframe(df_addon, use_container_width=True, height=150)
+
+            with st.spinner("🧠 Extracting detailed coverage data..."):
+                if addon_covers_result:
+                    addon_coverages_result = create_addon_coverages(text, addon_covers_result[0])
+                else:
+                    addon_coverages_result = {}
+            
+            st.subheader("📋 Extracted Addon Coverages Details")
+            if addon_coverages_result:
+                # --- FINAL FIX: This logic correctly handles the list of dictionaries ---
+                display_data = []
+                for cover_name, details_list in addon_coverages_result.items():
+                    for i, details_dict in enumerate(details_list):
+                        display_name = f"{cover_name} ({i+1})" if len(details_list) > 1 else cover_name
+                        row = {"Coverage": display_name}
+                        row.update(details_dict)
+                        display_data.append(row)
+                
+                if display_data:
+                    df_coverages = pd.DataFrame(display_data).fillna('')
+                    st.dataframe(df_coverages, use_container_width=True)
+            else:
+                st.info("No detailed coverage data extracted.")
+
+            with st.sidebar:
+                with st.spinner("Creating final Excel file..."):
+                    try:
+                        wb = create_final_excel_workbook(addon_covers_result, addon_coverages_result)
+                        excel_buffer = BytesIO()
+                        wb.save(excel_buffer)
+                        excel_buffer.seek(0)
+                        
+                        st.download_button(
+                            label="📥 Download Full Excel Report",
+                            data=excel_buffer.getvalue(),
+                            file_name=f"Full_Report_{uploaded_file.name.split('.')[0]}_{datetime.now().strftime('%d-%m-%Y')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.error(f"❌ Error generating Excel file: {str(e)}")
+    else:
+        st.info("Please upload a file to begin.")
+
+
+if __name__ == "__main__":
+    main()
