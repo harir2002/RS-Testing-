@@ -4,11 +4,10 @@ import openpyxl
 import io
 from datetime import datetime
 
-# --- NEW: Core Logic for Exact Value Reconciliation ---
+# --- Core Reconciliation Logic (no changes here) ---
 def compare_excel_files(input_file, output_file):
     results = {}
     try:
-        # Load both workbooks with data_only=True to get the values
         input_wb = openpyxl.load_workbook(input_file, data_only=True)
         output_wb = openpyxl.load_workbook(output_file, data_only=True)
     except Exception as e:
@@ -23,16 +22,14 @@ def compare_excel_files(input_file, output_file):
             input_ws = input_wb[sheet_name]
             output_ws = output_wb[sheet_name]
             
-            # Use the input file's dimensions as the source of truth
             num_data_cols = input_ws.max_column
             num_data_rows = input_ws.max_row
             
             headers = {c: input_ws.cell(row=3, column=c).value for c in range(1, num_data_cols + 1)}
 
-            # --- 1. HEADER VALUE CHECK (Row 3) ---
+            # HEADER VALUE CHECK (Row 3)
             for col in range(1, num_data_cols + 1):
                 template_cell = input_ws.cell(row=3, column=col)
-                # Skip check if the template header cell is empty
                 if template_cell.value is None or str(template_cell.value).strip() == '':
                     continue
                 
@@ -45,13 +42,11 @@ def compare_excel_files(input_file, output_file):
                 else:
                     results[sheet_name]["correct_cells"].append({**error_base, "Template_Value": template_cell.value, "Output_Value": output_cell.value})
 
-            # --- 2. DATA VALUE CHECK (Row 4 onwards) ---
-            # Loop is driven by the number of rows in the INPUT file
+            # DATA VALUE CHECK (Row 4 onwards)
             for row_idx in range(4, num_data_rows + 1):
                 for col_idx in range(1, num_data_cols + 1):
                     template_cell = input_ws.cell(row=row_idx, column=col_idx)
                     
-                    # If the cell in the template is empty, skip the check for this cell
                     if template_cell.value is None or str(template_cell.value).strip() == "":
                         continue
 
@@ -72,8 +67,8 @@ def compare_excel_files(input_file, output_file):
     
     return results
 
-# --- UPDATED: Simplified Report Generation for Reconciliation ---
-def generate_excel_report(results, epic_number):
+# --- Report Generation (no changes here) ---
+def generate_excel_report(results):
     output_stream = io.BytesIO()
     writer = pd.ExcelWriter(output_stream, engine='xlsxwriter')
     workbook = writer.book
@@ -84,32 +79,36 @@ def generate_excel_report(results, epic_number):
         if sheet_results:
             for error in sheet_results.get("discrepancies", []):
                 all_results_list.append({
-                    "EPIC #": epic_number, "SHEET": sheet_name, "CELL": error.get("Cell", "N/A"),
-                    "FIELD": error.get("Column", "N/A"), "EXPECTED VALUE": str(error.get("Template_Value", "")),
-                    "TEST VALUE": str(error.get("Output_Value", "")), "RIGHT/WRONG": "WRONG",
-                    "Correct fields": "", "Wrong fields": error.get("Reason", "Unknown Error")
+                    "SHEET": sheet_name, 
+                    "CELL": error.get("Cell", "N/A"),
+                    "FIELD": error.get("Column", "N/A"), 
+                    "EXPECTED VALUE": str(error.get("Template_Value", "")),
+                    "TEST VALUE": str(error.get("Output_Value", "")), 
+                    "RIGHT/WRONG": "WRONG",
+                    "Reason": error.get("Reason", "Unknown Error")
                 })
             for correct in sheet_results.get("correct_cells", []):
                  all_results_list.append({
-                    "EPIC #": epic_number, "SHEET": sheet_name, "CELL": correct.get("Cell", "N/A"),
-                    "FIELD": correct.get("Column", "N/A"), "EXPECTED VALUE": str(correct.get("Template_Value", "")),
-                    "TEST VALUE": str(correct.get("Output_Value", "")), "RIGHT/WRONG": "RIGHT",
-                    "Correct fields": "OK", "Wrong fields": ""
+                    "SHEET": sheet_name, 
+                    "CELL": correct.get("Cell", "N/A"),
+                    "FIELD": correct.get("Column", "N/A"), 
+                    "EXPECTED VALUE": str(correct.get("Template_Value", "")),
+                    "TEST VALUE": str(correct.get("Output_Value", "")), 
+                    "RIGHT/WRONG": "RIGHT",
+                    "Reason": "OK"
                 })
 
-    columns = ["EPIC #", "SHEET", "CELL", "FIELD", "EXPECTED VALUE", "TEST VALUE", "RIGHT/WRONG", "Correct fields", "Wrong fields"]
+    columns = ["SHEET", "CELL", "FIELD", "EXPECTED VALUE", "TEST VALUE", "RIGHT/WRONG", "Reason"]
     if not all_results_list:
         detailed_df = pd.DataFrame(columns=columns)
     else:
         detailed_df = pd.DataFrame(all_results_list, columns=columns)
 
-    # Simplified KPI calculations
     correct_count = len(detailed_df[detailed_df["RIGHT/WRONG"] == "RIGHT"])
     wrong_count = len(detailed_df[detailed_df["RIGHT/WRONG"] == "WRONG"])
     total_count = correct_count + wrong_count
     accuracy_score = (correct_count / total_count * 100) if total_count > 0 else 100
 
-    # Create Sheet 1: Simplified QA Dashboard
     dashboard_sheet = workbook.add_worksheet("QA Dashboard")
     title_format = workbook.add_format({'bold': True, 'font_size': 20, 'align': 'center', 'valign': 'vcenter'})
     kpi_format = workbook.add_format({'bold': True, 'font_size': 28, 'align': 'center', 'valign': 'vcenter'})
@@ -121,7 +120,6 @@ def generate_excel_report(results, epic_number):
     dashboard_sheet.merge_range('B10:F12', f"{accuracy_score:.1f}%", kpi_format); dashboard_sheet.merge_range('B13:F13', 'Overall Accuracy Score', kpi_label_format)
     dashboard_sheet.set_column('B:F', 20)
     
-    # Create Sheet 2: Detailed Test Results
     detailed_df.to_excel(writer, sheet_name="Detailed Test Results", index=False, startrow=1, header=False)
     worksheet = writer.sheets["Detailed Test Results"]
 
@@ -132,18 +130,18 @@ def generate_excel_report(results, epic_number):
     for col_num, col_name in enumerate(detailed_df.columns):
         if col_num < 3:
             worksheet.write(0, col_num, col_name, header_format_yellow)
-        elif col_num < 6:
+        elif col_num < 5:
             worksheet.write(0, col_num, col_name, header_format_red)
         else:
             worksheet.write(0, col_num, col_name, header_format_green)
     
-    worksheet.set_column('A:I', 22)
+    worksheet.set_column('A:G', 22)
 
     writer.close()
     output_stream.seek(0)
     return output_stream
 
-# --- UI for the new Reconciliation Tool ---
+# --- UI (no changes here) ---
 st.set_page_config(page_title="Excel Reconciliation Tool", layout="wide")
 st.title("Excel Data Reconciliation Tool")
 
@@ -151,16 +149,12 @@ if 'ran_comparison' not in st.session_state:
     st.session_state.ran_comparison = False
 if 'results' not in st.session_state:
     st.session_state.results = {}
-if 'epic_number' not in st.session_state:
-    st.session_state.epic_number = ""
 
-epic_number = st.text_input("Enter EPIC #")
 input_file = st.file_uploader("Upload Input (Source of Truth) Excel", type=['xlsx'])
 output_file = st.file_uploader("Upload Output (File to Test) Excel", type=['xlsx'])
 
-if epic_number and input_file and output_file:
+if input_file and output_file:
     if st.button("Run Reconciliation", type="primary"):
-        st.session_state.epic_number = epic_number
         with st.spinner("Performing cell-by-cell reconciliation..."):
             st.session_state.results = compare_excel_files(input_file, output_file)
         st.session_state.ran_comparison = True
@@ -181,9 +175,10 @@ if st.session_state.ran_comparison:
         col3.metric(label="❌ Mismatched Cells", value=wrong_count, delta_color="inverse")
                 
         st.markdown("---")
+        # --- THIS IS THE ONLY CHANGE ---
         st.download_button(
-            label="📄 Download Full Reconciliation Report (Excel)", 
-            data=generate_excel_report(results, st.session_state.epic_number), 
-            file_name=f"EPIC_{st.session_state.epic_number}_Reconciliation_Report_{datetime.now().strftime('%d-%m-%Y_%H-%M')}.xlsx", 
+            label="📄 Download Full Test Report (Excel)", 
+            data=generate_excel_report(st.session_state.results), 
+            file_name=f"Test_Report_{datetime.now().strftime('%d-%m-%Y_%H-%M')}.xlsx", 
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
