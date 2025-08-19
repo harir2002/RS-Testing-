@@ -2,10 +2,10 @@ import streamlit as st
 import pandas as pd
 import openpyxl
 import io
+import re # Using regex for robust whitespace removal
 from datetime import datetime
-from difflib import SequenceMatcher
 
-# --- Helper function for Data Type check ONLY ---
+# --- Helper functions ---
 def get_excel_format_type(number_format):
     """Maps Excel's built-in cell format to a more specific conceptual type."""
     if not number_format:
@@ -20,30 +20,23 @@ def get_excel_format_type(number_format):
     if fmt == 'general': return 'General'
     return "Other"
 
-# --- FINAL, MOST ROBUST NORMALIZATION FUNCTION ---
 def normalize_value_for_comparison(value):
     """
     Intelligently normalizes a value to its true content for comparison.
-    It converts numbers-stored-as-text into actual numbers.
+    Handles numbers stored as text and removes ALL types of whitespace.
     """
-    # If the value is text...
     if isinstance(value, str):
-        # Clean it up by removing spaces and making it lowercase.
-        cleaned_value = value.strip().lower().replace(' ', '')
-        # Try to convert it to a number (float or int).
+        cleaned_value = value.strip().lower()
+        cleaned_value = re.sub(r'\s+', '', cleaned_value)
         try:
-            # If it contains a decimal, treat as a float.
             if '.' in cleaned_value:
                 return float(cleaned_value)
-            # Otherwise, treat as an integer.
             return int(cleaned_value)
         except (ValueError, TypeError):
-            # If it cannot be converted, return the cleaned text.
             return cleaned_value
-    # If it is already a number or another type, return it as is.
     return value
 
-# ---------------- Core Validation Logic using the final function ----------------
+# ---------------- Core Validation Logic with Simplified Reason Text ----------------
 def compare_excel_files(input_file, output_file):
     results = {}
     try:
@@ -55,22 +48,37 @@ def compare_excel_files(input_file, output_file):
         st.error(f"Error: Could not load Excel files. Details: {e}")
         return {}
 
-    common_sheets = sorted(set(input_wb_fmt.sheetnames).intersection(output_wb_fmt.sheetnames))
-    for sheet_name in common_sheets:
+    sheets_to_process = input_wb_val.sheetnames
+    
+    for sheet_name in sheets_to_process:
         try:
             results[sheet_name] = []
-            ws_in_fmt, ws_out_fmt = input_wb_fmt[sheet_name], output_wb_fmt[sheet_name]
-            ws_in_val, ws_out_val = input_wb_val[sheet_name], output_wb_val[sheet_name]
+            ws_in_val = input_wb_val[sheet_name]
             num_cols, num_rows = ws_in_val.max_column, ws_in_val.max_row
             headers = {c: ws_in_val.cell(row=3, column=c).value for c in range(1, num_cols + 1)}
 
+            if sheet_name not in output_wb_val.sheetnames:
+                st.warning(f"Sheet '{sheet_name}' from the template is MISSING in the output file.")
+                for c in range(1, num_cols + 1):
+                    for r in range(3, num_rows + 1):
+                        t_val = ws_in_val.cell(row=r, column=c).value
+                        if t_val is None or str(t_val).strip() == '': continue
+                        results[sheet_name].append({
+                            "SHEET": sheet_name, "CELL": ws_in_val.cell(row=r, column=c).coordinate,
+                            "FIELD": headers.get(c, f"Col_{c}"), "EXPECTED VALUE": str(t_val),
+                            "TEST VALUE": "N/A (Sheet Missing)", "Data Type Result": "Wrong",
+                            "Data Type Reason": f"Sheet '{sheet_name}' not in output.",
+                            "Value Result": "Wrong", "Value Reason": f"Sheet '{sheet_name}' not in output."
+                        })
+                continue
+
+            ws_in_fmt = input_wb_fmt[sheet_name]
+            ws_out_fmt = output_wb_fmt[sheet_name]
+            ws_out_val = output_wb_val[sheet_name]
+
+            # --- THIS IS THE CHANGE: Simplified reason function ---
             def get_mismatch_reason(template_val, output_val):
-                reason = f"The template value is `{template_val}`, but the output has `{output_val}`."
-                if isinstance(template_val, str) and isinstance(output_val, str):
-                    similarity = SequenceMatcher(None, str(template_val).lower(), str(output_val).lower()).ratio()
-                    if similarity > 0.85:
-                        reason += " This may be a spelling mistake."
-                return reason
+                return f"The template value is `{template_val}`, but the output has `{output_val}`."
 
             for c in range(1, num_cols + 1):
                 for r in range(3, num_rows + 1):
@@ -84,7 +92,6 @@ def compare_excel_files(input_file, output_file):
                     dtype_res = "Correct" if is_dtype_match else "Wrong"
                     dtype_reason = "Data types match" if is_dtype_match else f"Template type is `{t_type}`, but output is `{o_type}`."
                     
-                    # ** THE FIX IS HERE: Use the robust normalization function **
                     is_match = normalize_value_for_comparison(t_val) == normalize_value_for_comparison(o_val)
                     val_res = "Correct" if is_match else "Wrong"
                     val_reason = "Values match" if is_match else get_mismatch_reason(t_val, o_val)
@@ -112,14 +119,20 @@ def generate_excel_report(results):
     all_rows = [row for sheet_rows in results.values() for row in sheet_rows]
     if not all_rows: return None
     df = pd.DataFrame(all_rows)
+    
+    total_value_checks = len(df)
     data_df = df[df["Data Type Result"] != "N/A"].copy()
-    total_checked = len(data_df)
-    dtype_correct = len(data_df[data_df["Data Type Result"] == "Correct"]) if "Data Type Result" in data_df else 0
-    value_correct = len(df[df["Value Result"] == "Correct"]) if "Value Result" in df else 0
-    dtype_accuracy = (dtype_correct / total_checked * 100) if total_checked > 0 else 100
-    value_accuracy = (value_correct / len(df) * 100) if len(df) > 0 else 100
-    dtype_errors = total_checked - dtype_correct
-    value_errors = len(df) - value_correct
+    total_dtype_checks = len(data_df)
+    
+    dtype_correct = len(data_df[data_df["Data Type Result"] == "Correct"])
+    value_correct = len(df[df["Value Result"] == "Correct"])
+    
+    dtype_accuracy = (dtype_correct / total_dtype_checks * 100) if total_dtype_checks > 0 else 100
+    value_accuracy = (value_correct / total_value_checks * 100) if total_value_checks > 0 else 100
+    
+    dtype_errors = total_dtype_checks - dtype_correct
+    value_errors = total_value_checks - value_correct
+
     dash = workbook.add_worksheet("QA Dashboard")
     title_fmt, kpi_fmt, label_fmt = workbook.add_format({'bold': True, 'font_size': 20, 'align': 'center', 'valign': 'vcenter'}), workbook.add_format({'bold': True, 'font_size': 28, 'align': 'center', 'valign': 'vcenter'}), workbook.add_format({'font_size': 12, 'align': 'center', 'font_color': '#595959'})
     dash.merge_range('B2:G3', 'Validation Dashboard', title_fmt); dash.merge_range('B5:D7', f"{dtype_accuracy:.1f}%", kpi_fmt); dash.merge_range('B8:D8', 'Data Type Accuracy', label_fmt); dash.merge_range('E5:G7', f"{value_accuracy:.1f}%", kpi_fmt); dash.merge_range('E8:G8', 'Value Accuracy', label_fmt); dash.merge_range('B10:D12', dtype_errors, kpi_fmt); dash.merge_range('B13:D13', 'Data Type Errors', label_fmt); dash.merge_range('E10:G12', value_errors, kpi_fmt); dash.merge_range('E13:G13', 'Value Errors', label_fmt); dash.set_column('B:G', 22)
@@ -165,14 +178,19 @@ if st.session_state.ran:
         if report_data:
             all_rows = [row for sheet_rows in res.values() for row in sheet_rows]
             df = pd.DataFrame(all_rows)
+            total_value_checks = len(df)
             data_df = df[df["Data Type Result"] != "N/A"].copy()
-            total_checked = len(data_df)
+            total_dtype_checks = len(data_df)
+            
             dtype_correct = len(data_df[data_df["Data Type Result"] == "Correct"])
             value_correct = len(df[df["Value Result"] == "Correct"])
-            dtype_accuracy = (dtype_correct / total_checked * 100) if total_checked > 0 else 100
-            value_accuracy = (value_correct / len(df) * 100) if len(df) > 0 else 100
-            dtype_errors = total_checked - dtype_correct
-            value_errors = len(df) - value_correct
+            
+            dtype_accuracy = (dtype_correct / total_dtype_checks * 100) if total_dtype_checks > 0 else 100
+            value_accuracy = (value_correct / total_value_checks * 100) if total_value_checks > 0 else 100
+            
+            dtype_errors = total_dtype_checks - dtype_correct
+            value_errors = total_value_checks - value_correct
+            
             st.header("Validation Summary")
             col1, col2 = st.columns(2)
             col1.metric("📊 Data Type Accuracy", f"{dtype_accuracy:.1f}%", f"{dtype_errors} Errors", delta_color="inverse")
